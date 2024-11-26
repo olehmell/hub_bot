@@ -2,18 +2,22 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import os
 from dotenv import load_dotenv
+from pymongo import MongoClient
 
 # Load environment variables
 load_dotenv()
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 FORWARD_CHAT_ID = os.getenv('FORWARD_CHAT_ID')
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017')
 
 if not BOT_TOKEN or not FORWARD_CHAT_ID:
     raise ValueError("Missing required environment variables. Please check your .env file")
 
-# Словник для збереження асоціації повідомлень
-user_to_chat_map = {}
+# Initialize MongoDB connection
+client = MongoClient(MONGO_URI)
+db = client['telegram_bot']
+message_mappings = db['message_mappings']
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробляє команду /start."""
@@ -23,11 +27,9 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Forwards user message to the target chat."""
     message = update.message
     
-    # Ignore messages from the bot itself
     if message.from_user.id == context.bot.id:
         return
         
-    # Only process messages from private chats (users)
     if message.chat.type != 'private':
         return
 
@@ -37,31 +39,30 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_id=message.message_id
     )
 
-    # Store message association
-    user_to_chat_map[forwarded_message.message_id] = {
+    # Store message association in MongoDB
+    message_mappings.insert_one({
+        "_id": forwarded_message.message_id,
         "user_chat_id": message.chat.id,
         "user_message_id": message.message_id,
-    }
+    })
 
 async def handle_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles replies from the forward chat."""
     message = update.message
     
-    # Only process messages from the forward chat
     if message.chat.id != int(FORWARD_CHAT_ID):
         return
         
-    # Only process replies
     if not message.reply_to_message:
         return
         
-    # Get original message data
+    # Get original message data from MongoDB
     original_msg_id = message.reply_to_message.message_id
-    if original_msg_id not in user_to_chat_map:
+    original_data = message_mappings.find_one({"_id": original_msg_id})
+    
+    if not original_data:
         return
         
-    original_data = user_to_chat_map[original_msg_id]
-    
     # Forward the reply directly to the original user
     await context.bot.copy_message(
         chat_id=original_data["user_chat_id"],
